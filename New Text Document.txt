@@ -1,0 +1,183 @@
+import bpy, math
+from mathutils import Vector
+
+# ---------- clean ----------
+bpy.ops.object.select_all(action='SELECT'); bpy.ops.object.delete()
+for c in list(bpy.data.collections): bpy.data.collections.remove(c)
+sc = bpy.context.scene
+sc.render.fps = 24
+sc.frame_start, sc.frame_end = 1, 360
+sc.render.resolution_x, sc.render.resolution_y = 1280, 720   # preview; raise to 1920x1080 for final
+
+def col(name):
+    c = bpy.data.collections.new(name); sc.collection.children.link(c); return c
+C = {n: col(n) for n in ["Environment","Woman","Dress_Hair","Bird_Cage","Man","Pedestrians","Lighting","Cameras","Animation"]}
+
+def mat(name, color, rough=0.7, bump=0.0, scale=40):
+    m = bpy.data.materials.new(name); m.use_nodes = True
+    b = m.node_tree.nodes["Principled BSDF"]
+    b.inputs["Base Color"].default_value = (*color, 1); b.inputs["Roughness"].default_value = rough
+    if bump:
+        n = m.node_tree.nodes.new("ShaderNodeTexNoise"); n.inputs["Scale"].default_value = scale
+        bp = m.node_tree.nodes.new("ShaderNodeBump"); bp.inputs["Strength"].default_value = bump
+        m.node_tree.links.new(n.outputs["Fac"], bp.inputs["Height"])
+        m.node_tree.links.new(bp.outputs["Normal"], b.inputs["Normal"])
+    return m
+
+def box(name, loc, size, m, coll):
+    bpy.ops.mesh.primitive_cube_add(location=loc)
+    o = bpy.context.active_object; o.name = name; o.scale = (size[0]/2, size[1]/2, size[2]/2)
+    o.data.materials.append(m); coll.objects.link(o); bpy.context.scene.collection.objects.unlink(o); return o
+
+def prim(kind, name, loc, scale, m, coll):
+    getattr(bpy.ops.mesh, f"primitive_{kind}_add")(location=loc)
+    o = bpy.context.active_object; o.name = name; o.scale = scale
+    o.data.materials.append(m); coll.objects.link(o); bpy.context.scene.collection.objects.unlink(o); return o
+
+# ---------- materials ----------
+M_cobble = mat("Cobble", (0.13,0.12,0.11), 0.85, 1.0, 120)
+M_stone  = mat("PavementStone", (0.35,0.33,0.30), 0.8, 0.4, 60)
+M_brick  = mat("Brick", (0.38,0.17,0.12), 0.9, 0.6, 50)
+M_plast  = mat("Plaster", (0.55,0.52,0.45), 0.9, 0.3, 30)
+M_glass  = mat("Glass", (0.05,0.07,0.08), 0.05)
+M_dress  = mat("DressRedBrown", (0.30,0.07,0.03), 0.75, 0.15, 200)
+M_metal  = mat("CageMetal", (0.08,0.07,0.05), 0.35)
+M_coat   = mat("DarkCoat", (0.03,0.03,0.035), 0.9)
+M_ph     = mat("PLACEHOLDER", (0.6,0.45,0.38), 0.6)
+
+# ---------- street (1 street along Y, 60 m) ----------
+E = C["Environment"]
+box("Road", (0,0,-0.05), (8,70,0.1), M_cobble, E)
+box("PavementL", (-5.5,0,0.05), (3,70,0.2), M_stone, E)
+box("PavementR", (5.5,0,0.05), (3,70,0.2), M_stone, E)
+for side in (-1, 1):
+    for i in range(-5, 5):
+        h = 11 + (i % 3) * 1.5
+        m = M_brick if (i + side) % 2 else M_plast
+        box(f"Bldg_{side}_{i}", (side*10.5, i*6.2, h/2), (8, 6.1, h), m, E)
+        for fl in range(3):          # windows (cheap boxes)
+            box(f"Win_{side}_{i}_{fl}", (side*6.45, i*6.2, 3.5+fl*3), (0.1, 1.2, 1.8), M_glass, E)
+        box(f"Shop_{side}_{i}", (side*6.5, i*6.2, 1.6), (0.15, 4.2, 2.8), M_glass, E)
+
+# ---------- woman (PLACEHOLDER body; face slot for a licensed asset) ----------
+W = C["Woman"]
+prim("cylinder", "Body_PLACEHOLDER", (0,0,0.9), (0.28,0.28,0.9), M_dress, C["Dress_Hair"])
+prim("uv_sphere", "FACE_SLOT_WOMAN", (0,0,1.55), (0.1,0.12,0.13), M_ph, W)
+cage = prim("uv_sphere", "BirdCage", (0.35,-0.15,1.0), (0.12,0.12,0.16), M_metal, C["Bird_Cage"])
+prim("uv_sphere", "Bird", (0.35,-0.15,0.98), (0.04,0.05,0.04), M_ph, C["Bird_Cage"])
+
+# ---------- passing man (replace with rigged walk-cycle asset) ----------
+man = prim("cylinder", "Man_PLACEHOLDER", (-9,-3,0.9), (0.25,0.25,0.9), M_coat, C["Man"])
+man.keyframe_insert("location", frame=169)
+man.location = (9,-3,0.9); man.keyframe_insert("location", frame=252)
+
+# ---------- carriages + pedestrians (few, simple) ----------
+for i, (x, y0, y1) in enumerate([(-2.5, 25, -25), (2.5, -25, 25)]):
+    c = box(f"Carriage_{i}", (x,y0,1.2), (1.6,3.2,2.2), M_coat, C["Pedestrians"])
+    c.keyframe_insert("location", frame=1)
+    c.location.y = y1; c.keyframe_insert("location", frame=360)
+for i, (x, y) in enumerate([(-5,8),(5,12),(-5.5,-8),(5.2,-12)]):
+    p = prim("cylinder", f"Ped_{i}", (x,y,0.9), (0.22,0.22,0.9), M_coat, C["Pedestrians"])
+    p.keyframe_insert("location", frame=1)
+    p.location.y += 14; p.keyframe_insert("location", frame=360)
+
+# ---------- lighting: morning sun + sky ----------
+L = C["Lighting"]
+sun = bpy.data.lights.new("Sun", 'SUN'); sun.energy = 4.0; sun.color = (1.0,0.93,0.82); sun.angle = math.radians(2)
+so = bpy.data.objects.new("Sun", sun); so.rotation_euler = (math.radians(55), 0, math.radians(35)); L.objects.link(so)
+fill = bpy.data.lights.new("Fill", 'AREA'); fill.energy = 150; fill.size = 6; fill.color = (0.75,0.85,1.0)
+fo = bpy.data.objects.new("Fill", fill); fo.location = (-5,-6,3); fo.rotation_euler = (math.radians(75),0,math.radians(-40)); L.objects.link(fo)
+rim = bpy.data.lights.new("Rim", 'SPOT'); rim.energy = 400; rim.spot_size = math.radians(40)
+ro = bpy.data.objects.new("Rim", rim); ro.location = (3,4,3.5); ro.rotation_euler = (math.radians(120),0,math.radians(160)); L.objects.link(ro)
+sc.world = bpy.data.worlds.new("Sky"); sc.world.use_nodes = True
+sky = sc.world.node_tree.nodes.new("ShaderNodeTexSky")
+sc.world.node_tree.links.new(sky.outputs["Color"], sc.world.node_tree.nodes["Background"].inputs["Color"])
+sc.world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.6
+
+# ---------- cameras ----------
+K = C["Cameras"]
+tgt = bpy.data.objects.new("CamTarget", None); tgt.location = (0,0,1.4); K.objects.link(tgt)
+def cam(name, lens, p0, p1, f0, f1, target_z=None):
+    d = bpy.data.cameras.new(name); d.lens = lens; d.sensor_width = 36
+    d.dof.use_dof = True; d.dof.focus_object = tgt; d.dof.aperture_fstop = 2.8 if lens > 60 else 5.6
+    o = bpy.data.objects.new(name, d); K.objects.link(o)
+    t = o.constraints.new('TRACK_TO'); t.target = tgt; t.track_axis = 'TRACK_NEGATIVE_Z'; t.up_axis = 'UP_Y'
+    o.location = p0; o.keyframe_insert("location", frame=f0)
+    o.location = p1; o.keyframe_insert("location", frame=f1)
+    return o
+c1 = cam("CAM_01_Dolly",  38, (0,-24,1.6), (0,-5.5,1.6), 1, 108)
+c2 = cam("CAM_02_CloseUp",85, (0.0,-1.4,1.55), (0.0,-1.3,1.55), 109, 168)
+c3 = cam("CAM_03_Wide",   35, (6,-9,1.7), (6,-9,1.7), 169, 252)
+c4 = cam("CAM_04_Crane",  28, (0,-6,6), (0.4,-2,40), 253, 360)
+for f0, c in [(1,c1),(109,c2),(169,c3),(253,c4)]:
+    m = sc.timeline_markers.new(f"cut_{c.name}", frame=f0); m.camera = c
+sc.camera = c1
+
+# ---------- render settings ----------
+sc.render.engine = 'CYCLES'
+sc.cycles.samples = 64; sc.cycles.use_denoising = True      # raise to 256+ only for final
+sc.cycles.max_bounces = 6; sc.render.use_motion_blur = True
+sc.view_settings.view_transform = 'AgX'
+sc.render.image_settings.file_format = 'PNG'                 # frame sequence: crash-safe
+sc.render.filepath = "//render/frame_"
+print("Scene built. Replace *_PLACEHOLDER objects and FACE_SLOT_WOMAN with licensed rigged assets.")
+# ---------- generic invented face + hair ----------
+Wc, Hc = C["Woman"], C["Dress_Hair"]
+M_skin = mat("Skin", (0.62,0.45,0.36), 0.45, 0.05, 300)
+M_skin.node_tree.nodes["Principled BSDF"].inputs["Subsurface Weight"].default_value = 0.08
+M_hair = bpy.data.materials.new("Hair"); M_hair.use_nodes = True
+nt = M_hair.node_tree; nt.nodes.clear()
+hb = nt.nodes.new("ShaderNodeBsdfHairPrincipled"); hb.inputs["Color"].default_value = (0.07,0.045,0.03,1) if "Color" in hb.inputs else None
+out = nt.nodes.new("ShaderNodeOutputMaterial"); nt.links.new(hb.outputs[0], out.inputs["Surface"])
+
+head = bpy.data.objects["FACE_SLOT_WOMAN"]
+head.name = "Head_Generic"; head.data.materials.clear(); head.data.materials.append(M_skin)
+for nm, loc, sc_ in [("Eye_L",(-0.04,-0.105,1.57),(0.016,0.012,0.016)),("Eye_R",(0.04,-0.105,1.57),(0.016,0.012,0.016)),
+                     ("Nose",(0,-0.12,1.54),(0.014,0.02,0.025)),("Lips",(0,-0.11,1.495),(0.03,0.012,0.01))]:
+    m_ = M_skin if nm == "Nose" else mat(nm, (0.85,0.85,0.85) if "Eye" in nm else (0.5,0.2,0.2), 0.3)
+    prim("uv_sphere", nm, loc, sc_, m_, Wc)
+
+scalp = prim("uv_sphere", "Scalp_Hair", (0,0.01,1.6), (0.108,0.12,0.115), M_skin, Hc)
+scalp.data.materials.append(M_hair)
+scalp.modifiers.new("Hair", 'PARTICLE_SYSTEM')
+ps = scalp.particle_systems[0].settings
+ps.type = 'HAIR'; ps.count = 1500; ps.hair_length = 0.30
+ps.child_type = 'INTERPOLATED'; ps.child_nbr = 6; ps.rendered_child_count = 12
+ps.material = 2; ps.hair_step = 4
+
+# ---------- single MP4 output ----------
+r = sc.render
+r.image_settings.file_format = 'FFMPEG'
+r.ffmpeg.format = 'MPEG4'; r.ffmpeg.codec = 'H264'
+r.ffmpeg.constant_rate_factor = 'HIGH'; r.ffmpeg.ffmpeg_preset = 'GOOD'
+r.filepath = "//victorian_london.mp4"
+def load(path, name, loc, rot_z=0, coll=None):
+    ext = path.lower().split('.')[-1]
+    before = set(bpy.data.objects)
+    if ext == 'fbx': bpy.ops.import_scene.fbx(filepath=path)
+    elif ext in ('glb','gltf'): bpy.ops.import_scene.gltf(filepath=path)
+    new = [o for o in bpy.data.objects if o not in before]
+    root = bpy.data.objects.new(name, None); coll.objects.link(root)
+    for o in new:
+        if o.parent is None: o.parent = root
+        for c in list(o.users_collection): c.objects.unlink(o)
+        coll.objects.link(o)
+    root.location = loc; root.rotation_euler[2] = math.radians(rot_z)
+    return root
+
+# امسح الـ Placeholders القديمة
+for n in ["Body_PLACEHOLDER","Head_Generic","Eye_L","Eye_R","Nose","Lips","Scalp_Hair","Man_PLACEHOLDER"]:
+    if n in bpy.data.objects: bpy.data.objects.remove(bpy.data.objects[n], do_unlink=True)
+
+woman = load("C:/assets/woman.fbx", "WOMAN", (0,0,0), 180, C["Woman"])
+man   = load("C:/assets/man_walk_inplace.fbx", "MAN", (-9,-3,0), 90, C["Man"])
+man.keyframe_insert("location", frame=169)
+man.location = (9,-3,0); man.keyframe_insert("location", frame=252)
+
+# ---------- الفوكس والبلور ----------
+tgt.parent = woman; tgt.location = (0,0,1.5)          # الفوكس دايماً على الست
+for o in C["Cameras"].objects:
+    if o.type != 'CAMERA': continue
+    d = o.data; d.dof.use_dof = True; d.dof.focus_object = tgt
+    d.dof.aperture_fstop = {"CAM_01_Dolly":2.0,"CAM_02_CloseUp":1.4,
+                            "CAM_03_Wide":2.0,"CAM_04_Crane":2.8}[o.name]
